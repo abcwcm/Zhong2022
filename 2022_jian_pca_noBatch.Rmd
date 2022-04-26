@@ -1,0 +1,133 @@
+---
+title: PCA
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  BiocStyle::html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, bootstrap.show.code = FALSE, results='hide', bootstrap.show.message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE)
+suppressMessages(library(data.table))
+suppressMessages(library(magrittr))
+suppressMessages(library(QoRTs))
+suppressMessages(library(reshape2))
+suppressMessages(library(tidyr))
+suppressMessages(library(plyr))
+suppressMessages(library(scater))
+suppressMessages(library(DESeq2))
+suppressMessages(library(limma))
+suppressMessages(library(edgeR))
+suppressMessages(library(ggplot2))
+suppressMessages(library(ggsci))
+suppressMessages(library(ggthemes))
+suppressMessages(library(kableExtra))
+suppressMessages(library(ggrepel))
+suppressMessages(library(openxlsx))
+```
+
+
+
+
+```{r decoder, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+decoderFile <- "decoder.txt"
+decoder.data <- fread(decoderFile) %>% as.data.frame()
+decoder.data$group <- factor(decoder.data$group)
+decoder.data$condition <- factor(decoder.data$group)
+decoder.data$batch <- factor(decoder.data$batch)
+```
+
+
+```{r counts, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+#table(colnames(counts) == decoder.data$sample.ID )
+```
+
+
+
+
+```{r calcTPMS, eval=T, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE,  fig.width=10, fig.height=7, context="data"}
+dir.create("./counts/", showWarnings = FALSE, recursive = FALSE, mode = "0777")
+
+## get gene lengths
+gene.lengths <- read.table(file = "WB2-resub.gene.counts", header = TRUE, check.names=FALSE, colClasses = c("character", "NULL", "NULL", "NULL", "NULL", "integer", "NULL"))
+row.names(gene.lengths) <- gene.lengths$Geneid
+gene.lengths <- gene.lengths[row.names(counts),]
+
+## tpms
+tpms = scater::calculateTPM(as.matrix(counts),lengths =  gene.lengths$Length)
+tpms = as.data.frame(tpms)
+write.xlsx(tpms, "./counts/2022_jian_rnaseq_tpms.xlsx", rowNames=T)
+
+## cpms
+cpms = edgeR::cpm(counts)
+write.xlsx(cpms, "./counts/2022_jian_rnaseq_cpms.xlsx", rowNames=T)
+
+## raw counts
+write.xlsx(counts, "./counts/2022_jian_rnaseq_rawCounts.xlsx", rowNames=T)
+```
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r samples, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+ kable(decoder.data[,c(-1,-6)], row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width=F)
+```
+
+
+
+
+# PCA + noBatch
+
+Below is a PCA plot of all of the samples which is colored by group, after adjusting between baseline differences between the batches:
+
+```{r noBatch, message=FALSE, warning=FALSE, cache=TRUE, fig.width=5, fig.height=5, context="data", fig.align='center'}
+coldata <- data.frame(decoder.data, row.names = colnames(counts), stringsAsFactors=F)
+coldata$group <- factor(make.names(coldata$group))
+coldata$group = relevel(coldata$group,ref = "WT")
+dds <- DESeq2::DESeqDataSetFromMatrix(countData = counts,
+                                      colData = coldata,
+                                      design = ~batch+group)
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- estimateSizeFactors(dds)
+
+dat  <- counts(dds, normalized = TRUE)
+
+design=model.matrix(~group, data=coldata)
+noBatch = limma::removeBatchEffect(log2(dat+1), batch = coldata$batch, design=design)
+
+ntop = 500
+Pvars <- rowVars((noBatch))
+select <- order(Pvars, decreasing = TRUE)[seq_len(min(ntop, length(Pvars)))]
+PCA <- prcomp(t((noBatch)[select, ]), scale = F)
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+data = data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2], decoder.data)
+library(ggsci)
+library(ggthemes)
+ggplot(data, aes(PC1, PC2, color=group, label=label)) +
+  geom_point(size=4) +
+  xlab(paste0("PC1: ",percentVar[1],"% variance")) +
+  ylab(paste0("PC2: ",percentVar[2],"% variance")) + 
+  scale_colour_viridis_d() + 
+  theme_bw() + theme(legend.position="bottom") +
+  ggtitle("PC1 vs PC2, top 500 most variable genes") + 
+  geom_label_repel(show.legend = F) + 
+  guides(color=guide_legend(nrow=1)) + 
+  theme(legend.title=element_blank())
+```
+
+
+
+***
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=TRUE,comment="",echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
+
