@@ -1,0 +1,219 @@
+---
+title: Figures for Zhong 2022
+subtitle: 
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+  html_document:
+    code_folding: hide
+    theme: space
+    toc: yes
+    toc_depth: 3
+    toc_float: no
+  BiocStyle::html_document2:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  knitrBootstrap::bootstrap_document:
+    highlight.chooser: yes
+    theme.chooser: yes
+  pdf_document:
+    toc: yes
+always_allow_html: yes
+---
+
+```{r setup, bootstrap.show.code = FALSE, results='hide', bootstrap.show.message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE)
+suppressMessages(library(data.table))
+suppressMessages(library(magrittr))
+suppressMessages(library(QoRTs))
+suppressMessages(library(reshape2))
+suppressMessages(library(tidyr))
+suppressMessages(library(plyr))
+suppressMessages(library(scater))
+suppressMessages(library(DESeq2))
+suppressMessages(library(limma))
+suppressMessages(library(edgeR))
+suppressMessages(library(ggplot2))
+suppressMessages(library(ggsci))
+suppressMessages(library(ggthemes))
+suppressMessages(library(kableExtra))
+suppressMessages(library(pheatmap))
+suppressMessages(library(openxlsx))
+suppressMessages(library(EnhancedVolcano))
+suppressMessages(library(VennDiagram))
+suppressMessages(library(gridExtra))
+suppressMessages(library(ComplexHeatmap))
+```
+
+
+
+
+
+```{r decoder, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+decoderFile <- "decoder.txt"
+decoder.data <- fread(decoderFile) %>% as.data.frame()
+decoder.data$group <- factor(decoder.data$group)
+decoder.data$condition <- factor(decoder.data$group)
+decoder.data$batch <- factor(decoder.data$batch)
+```
+
+
+```{r counts, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+#table(colnames(counts) == decoder.data$sample.ID )
+```
+
+```{r readInGtf, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+gtf =  rtracklayer::import("gencode.vM25.egfp.justGenes.gtf")
+gtf_df = as.data.frame(gtf)
+gtf_df = gtf_df[,c(1,2,3,12)]
+tfs_full <- read.table("Mus_musculus_TF.txt", sep="\t", header=T, stringsAsFactors = F) 
+tfs_full = tfs_full[,c("Symbol", "Family")]
+names(tfs_full) = c("gene_name", "TF_family")
+gtf_tfs = merge(gtf_df, tfs_full, by="gene_name", all.x=T)
+gtf_tfs = gtf_tfs[!duplicated(gtf_tfs),]
+df <- gtf_tfs %>% dplyr::group_by(gene_name) %>% dplyr::summarise(gene_name=gene_name,seqnames = paste(seqnames, collapse = ","),start = paste(start, collapse = ","),end = paste(end, collapse = ","), TF_family=TF_family)
+gtf_tfs = as.data.frame(df)
+gtf_tfs = gtf_tfs[!duplicated(gtf_tfs),]
+
+```
+
+# Samples
+
+The following samples were part of this analysis:
+
+```{r samples, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+ kable(decoder.data[,c(-1, -6)], row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width=F)
+```
+
+
+
+```{r runDESeq_withTwoFactors, message=FALSE, warning=FALSE, cache=TRUE, context="data"}
+library(ggrepel)
+coldata <- data.frame(decoder.data, row.names = colnames(counts), stringsAsFactors=F)
+coldata$group <- factor(make.names(coldata$group))
+coldata$group = relevel(coldata$group,ref = "WT")
+dds <- DESeq2::DESeqDataSetFromMatrix(countData = counts,
+                                      colData = coldata,
+                                      design = ~batch+group)
+
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+dds <- estimateSizeFactors(dds)
+dds = DESeq(dds)
+
+dat  <- counts(dds, normalized = TRUE)
+design=model.matrix(~group, data=coldata)
+normCounts = limma::removeBatchEffect(log2(dat+1), batch = coldata$batch, design=design)
+
+baseMeanPerLvl <- sapply( levels(dds$group), function(lvl) rowMeans( counts(dds,normalized=TRUE)[,dds$group == lvl, drop=F] ) )
+
+
+varInt="group"
+de.all <- list()
+alphaTR = 0.05
+for (comp in combn(nlevels(colData(dds)[,varInt]), 2, simplify=FALSE)){
+  levelRef <- levels(colData(dds)[,varInt])[comp[1]]
+  levelTest <- levels(colData(dds)[,varInt])[comp[2]]
+  cat(paste("Comparison", levelTest, "vs", levelRef, "done\n"))
+  de.all[[paste0(levelTest,"_vs_",levelRef)]] <- 
+    results(dds, contrast=c(varInt, levelTest, levelRef), alpha=alphaTR) %>% as.data.frame()
+}
+```
+
+
+```{r mergeWithChromTf,  message=FALSE, warning=FALSE, cache=TRUE, context="data"}
+for (comp in names(de.all)){
+  df = de.all[[comp]]
+  df = merge(df, gtf_tfs, by.x="row.names", by.y="gene_name", all.x=T)
+  row.names(df) = df$Row.names
+  df$Row.names = NULL
+  de.all[[comp]] <- df
+}
+
+```
+
+The following genes were detected as differentially expressed (adjusted p < `r alphaTR`):
+
+
+```{r printDEGtable, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, eval=TRUE}
+de.all.sig <- lapply(de.all, subset, padj < alphaTR)
+
+res =  as.data.frame(sapply(de.all.sig, nrow))
+colnames(res) <- paste0("padj<",alphaTR)
+
+rel.contrs = 1:nrow(res)
+
+kable(cbind(contrast=rel.contrs, res), row.names=T)  %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width=F)
+```
+
+All heatmaps are log2 DESeq2 normalized counts after adjusting for batch effect, centered and scaled by row.
+
+
+# Heatmap a {.tabset}
+
+
+```{r heatmap_a, eval=T,  warning=FALSE, cache=TRUE,comment=FALSE, echo=FALSE,  fig.width=8, fig.height=10,results="asis",  fig.path = "req_heatmaps_part3/", dev=c('png','pdf')}
+x=1
+name = row.names(res)[x]
+
+goi = read.xlsx("2022_03_jian_3hms.xlsx", sheet=1)
+
+kable(goi, row.names=FALSE,  padding = 0, longtable=TRUE) %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width=F)
+
+cond_a = strsplit( row.names(res)[x], "_vs_")[[1]][1]
+cond_b = strsplit( row.names(res)[x], "_vs_")[[1]][2] 
+decod.sub = subset(decoder.data, group %in% c(cond_a, cond_b))
+decod.sub = decod.sub[order(decod.sub$label, decreasing = F),]
+decod.sub = rbind(subset(decod.sub, group == "ckaBraf"), subset(decod.sub, group == "WT"))
+sig.rows =  de.all.sig[[x]] %>% as.data.frame() %>% row.names()
+sig.rows = sig.rows[sig.rows %in% goi$Row.names]
+annot_col =data.frame(Genotype = decod.sub$condition,row.names=decod.sub$sample.ID)
+samps = decod.sub$sample.ID
+log2.count.matrix = normCounts[sig.rows,samps] %>% as.matrix()
+log2.count.matrix  = log2.count.matrix[goi$Row.names,]
+annot_row = data.frame(row.names=goi$Row.names, TF_family=goi$TF_family)
+
+
+annoRow<-list(TF_family=c("TF_bZIP"="#92FC5B", 
+                          "Homeobox"="#B95F29", 
+                          "zf-C2H2"="#7197F8", 
+                          "bHLH"="#F19E38",
+          "ETS"="#BF6BF7",
+
+                        "HMGA" =gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[1],
+                          "TEA" = gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[2],
+                                                  "IRF" = gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[3],
+                          "STAT" = gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[4],
+                          "CP2" = gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[5],
+                          "AF-4" = gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[5],
+                                                  "HPD" = gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[6],
+                          "HSF" = gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[7],
+                          "HMG" = gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[8],
+                          "DM" = gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[9],
+
+                          "T-box" = gray.colors(10, start=0.1, end=0.9, gamma = 1.5)[10]), Genotype=c("ckaBraf" = "red", "WT" = "beige"))
+
+TF_family_levels = c(unique(annot_row$TF_family))
+
+
+goi$direction = factor(goi$direction, levels=c("upregulated (log2 FC > 0.8)", "downregulated (log2 FC<-0.8)"))
+write.xlsx(log2.count.matrix, file="./req_heatmaps_part3/hm_batchAdjusted_logNorm.xlsx", row.names=T)
+ComplexHeatmap::pheatmap(log2.count.matrix, scale="row", show_rownames=T, fontsize = 10, cellwidth = 25,cellheight=15, main =paste0(gsub("_vs_"," vs. ",  row.names(res)[x])),  annotation_col = annot_col,viridis::magma(50), silent = F , cluster_cols = F, cluster_rows=F, labels_col = decod.sub$label, heatmap_legend_param=list(legend_direction = "vertical", nrow = 1 , by_row = TRUE), annotation_colors = annoRow, fontsize_row = 10, row_gap = unit(c(1), "mm"), left_annotation = rowAnnotation(annotation_legend_param=list(TF_family=list(labels=TF_family_levels, at=TF_family_levels)),
+  direction = anno_block(gp = gpar(fill = "white"),labels = unique(goi$direction), labels_gp = gpar(col = "black")),  df = annot_row[, ncol(annot_row):1, drop = FALSE], show_legend = TRUE, col=annoRow, show_annotation_name = TRUE, gp = gpar(col = NA), annotation_name_gp = gpar(fontsize = 10, fontface = "bold"), simple_anno_size = unit(10, "bigpts"), gap = unit(2, "bigpts") ), row_split = goi$direction, row_title=NULL, cluster_row_slices=F, border_color = NA)
+
+
+```
+
+
+
+
+
+***
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=TRUE,comment="",echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
+
